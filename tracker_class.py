@@ -3,7 +3,6 @@ import numpy as np
 from typing import List, Tuple
 import torch, cv2
 import os, requests
-# import open3d as o3d
 import testing.utils as hf
 # Sam imports
 from tracker_mobilesam import BaseTracker 
@@ -14,7 +13,7 @@ from detectron2.projects.deeplab import add_deeplab_config
 from fcclip import add_maskformer2_config, add_fcclip_config
 from predictor import VisualizationDemo
 
-DEBUG_VISUALIZATION = True
+DEBUG_VISUALIZATION = False
 
 class CameraVideoData:
     """
@@ -36,6 +35,7 @@ class CameraVideoData:
     
     def __len__(self):
         return len(self.frames)
+    
 
 
 class Tracker:
@@ -50,7 +50,11 @@ class Tracker:
         self.tracker = BaseTracker(sam_xmem_checkpoint, device="cuda:0")
     
 
-    def track(self, viewpoints: List[CameraVideoData]):
+    def track(self, viewpoints: List[CameraVideoData]) -> List[float]:
+        """
+        This method returns a list of 3D positions of an object in the world frame, given a list of viewpoints.
+        The object that is tracked is the object that fcclip was configured to track given the text prompt
+        """
 
         # Assert that the number of frames is equal for all of your viewpoints.
         assert all(len(i) == len(viewpoints[0]) for i in viewpoints)
@@ -119,43 +123,21 @@ class Tracker:
 
         # Get the average point of the object to be the center
         object_center = np.mean(points, axis=0)
-
+        if np.isnan(object_center).any():
+            # Why this happens, the robot blocks the object except for a sliver. The sliver is accuratly tracked,
+            # but has no depth information. This leads to have a Nan. We should if we encounter a NAN switch cameras. 
+            # Get first mask should also calculate all of the masks, and then instead of picking the first, pick the largest.
+            print('nand')
         # transform the object center to the world frame
         object_center = viewpoints[current_viewpoint].extrinsics @ np.append(object_center, 1)
 
-        # if DEBUG_VISUALIZATION:
-        #     pcd = hf.get_pcd(viewpoints[current_viewpoint].intrinsics, viewpoints[current_viewpoint].frames[current_frame], viewpoints[current_viewpoint].depths[current_frame])
-        #     hf.add_point(pcd, [1, 0, 0], object_center[:3])
-        #     o3d.visualization.draw_geometries([pcd])
+        if DEBUG_VISUALIZATION:
+            pcd = hf.get_pcd(viewpoints[current_viewpoint].intrinsics, viewpoints[current_viewpoint].frames[current_frame], viewpoints[current_viewpoint].depths[current_frame])
+            hf.add_point(pcd, [1, 0, 0], object_center[:3])
+            o3d.visualization.draw_geometries([pcd])
         return object_center[:3]
     
 
-
-    def _download_ta_checkpoint(self, url: str, folder: str, filename: str) -> str:
-        """
-        Downloads a checkpoint file from the given URL and saves it to the specified folder with the given filename.
-        If the file already exists, it does not download it again.
-        Args:
-            url (str): The URL to download the checkpoint file from.
-            folder (str): The folder to save the downloaded checkpoint file to.
-            filename (str): The filename to use for the downloaded checkpoint file.
-
-        Returns:
-            str: The filepath of the downloaded checkpoint file.
-        """
-        os.makedirs(folder, exist_ok=True)
-        filepath = os.path.join(folder, filename)
-        if not os.path.exists(filepath):
-            print("download checkpoints ......")
-            response = requests.get(url, stream=True)
-            with open(filepath, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            print("download successfully!")
-        return filepath
-
-    
     def _get_first_valid_template_mask(self, rgbs:List[np.ndarray]) -> Tuple[int, torch.Tensor]:
         """
         Returns the index and mask of the first valid mask in the given list of RGB images.
@@ -173,7 +155,12 @@ class Tracker:
                 return i, template_mask[0]
             except TypeError:
                 continue
-        raise IndexError("No valid template masks were found in the given list of RGB images.")
+        # raise IndexError("No valid template masks were found in the given list of RGB images.")
+        os.makedirs('./debug', exist_ok=True)
+        for i, rgb in enumerate(rgbs):
+            plt.imshow(rgb)
+            plt.savefig(f'./debug/rgb{i}.png')
+        raise IndexError(f"No valid template masks were found in the given list of RGB images. Saved to ./debug folder. Trying to detect {self.fcclip.txt_prompt}")
 
 
     def _setup_cfg(self, fcclip_cfg_file, fcclip_weight_file):
@@ -219,4 +206,3 @@ def get_img_points(ints, depth_image) -> np.ndarray:
 
     pts = np.array(points).reshape(-1, 3)
     return pts
-
