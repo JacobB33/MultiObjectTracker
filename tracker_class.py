@@ -26,19 +26,27 @@ class CameraVideoData:
         intrinsics (numpy.ndarray): The camera intrinsics matrix.
         extrinsics (numpy.ndarray): The camera extrinsics matrix.
     """
-    def __init__(self, frames: list, depths: list, camera_intrinsics: np.ndarray, camera_extrinsics: np.ndarray = np.eye(3), convert_depth_to_meters: bool = True):
+    def __init__(self, frames: list, depths: list, camera_intrinsics: np.ndarray, camera_extrinsics: np.ndarray = np.eye(3), depth_mm_to_m: bool = True):
         assert len(frames) == len(depths)
         self.frames = np.array(frames)
-        self.depths = np.array(depths) / 1000 if convert_depth_to_meters else depths
+        self.depths = np.array(depths) / 1000 if depth_mm_to_m else depths
         self.intrinsics = camera_intrinsics
         self.extrinsics = camera_extrinsics
     
     def __len__(self):
         return len(self.frames)
     
+    # def add_frame(self, frame, depth):
+    #     self.frames = np.concatenate((self.frames, np.array([frame])))
+    #     self.depths = np.concatenate((self.depths, np.array([depth])))
+
+    
 
 
 class Tracker:
+    """
+    A class that tracks an object in a video sequence given a list of viewpoints.
+    """
     def __init__(self,
                  fcclip_config_file: str,
                  fcclip_weight_file: str,
@@ -63,7 +71,7 @@ class Tracker:
         object_poses = []
         mask_is_template = True
 
-        current_viewpoint, current_mask = self._get_first_valid_template_mask([frame.frames[0] for frame in viewpoints])
+        current_viewpoint, current_mask = self._get_largest_valid_template_mask([frame.frames[0] for frame in viewpoints])
         object_poses.append(self._get_object_pose(viewpoints, current_viewpoint, current_mask, current_frame=0, template_mask=mask_is_template))
         for i in range(1, len(viewpoints[0])):
             # plt.imshow(current_mask)
@@ -80,11 +88,15 @@ class Tracker:
                     current_mask, _, _= self.tracker.track(viewpoints[current_viewpoint].frames[i])
                 if(np.count_nonzero(current_mask) == 0):
                     raise IndexError
+                object_pose = self._get_object_pose(viewpoints, current_viewpoint, current_mask, current_frame=i, template_mask=mask_is_template)
+                if np.isnan(object_pose).any():
+                    raise IndexError
             # TODO: change this to not index error, but the error it raises 
             except IndexError:
-                current_viewpoint, current_mask = self._get_first_valid_template_mask([frame.frames[i] for frame in viewpoints])
+                current_viewpoint, current_mask = self._get_largest_valid_template_mask([frame.frames[i] for frame in viewpoints])
                 mask_is_template = True
-            object_poses.append(self._get_object_pose(viewpoints, current_viewpoint, current_mask, current_frame=i, template_mask=mask_is_template))
+                object_pose = self._get_object_pose(viewpoints, current_viewpoint, current_mask, current_frame=i, template_mask=mask_is_template)
+            object_poses.append(object_pose)
         return object_poses
     
     def _save_visualization(self, mask, rgb, depth, path, is_template):
@@ -138,9 +150,9 @@ class Tracker:
         return object_center[:3]
     
 
-    def _get_first_valid_template_mask(self, rgbs:List[np.ndarray]) -> Tuple[int, torch.Tensor]:
+    def _get_largest_valid_template_mask(self, rgbs:List[np.ndarray]) -> Tuple[int, torch.Tensor]:
         """
-        Returns the index and mask of the first valid mask in the given list of RGB images.
+        Returns the index and mask of the valid mask that is the largest in the given list of RGB images.
 
         Args:
             rgbs (List[np.ndarray]): A list of RGB images.
@@ -148,16 +160,22 @@ class Tracker:
         Returns:
             Tuple[int, torch.Tensor]: A tuple containing the index of the first valid template and its corresponding mask.
         """
+        masks = []
         for i, rgb in enumerate(rgbs):
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             try:
                 _, _, template_mask = self.fcclip.run_on_image(bgr)
-                return i, template_mask[0]
+                masks.append((i, template_mask[0]))
             except TypeError:
                 continue
+        if len(masks) > 0:
+            # pick the mask with the most true values in it
+            return max(masks, key=lambda x: np.count_nonzero(x[1]))
+        
         # raise IndexError("No valid template masks were found in the given list of RGB images.")
         os.makedirs('./debug', exist_ok=True)
         for i, rgb in enumerate(rgbs):
+            plt.cla(); plt.clf()
             plt.imshow(rgb)
             plt.savefig(f'./debug/rgb{i}.png')
         raise IndexError(f"No valid template masks were found in the given list of RGB images. Saved to ./debug folder. Trying to detect {self.fcclip.txt_prompt}")
